@@ -1,3 +1,5 @@
+from pathlib import Path
+from typing import List
 import pandas as pd
 import numpy as np
 from PIL import Image
@@ -7,15 +9,18 @@ import argparse
 import os
 import random
 from shutil import copyfile
- 
 
-def tiler(imnames, newpath, falsepath, slice_size, ext):
+from yaml import safe_load
+import yaml
+
+
+def tiler(imnames: List[str], out_image_path: Path, out_label_path: Path, slice_size: int, ext: str):
     for imname in imnames:
         im = Image.open(imname)
         imr = np.array(im, dtype=np.uint8)
         height = imr.shape[0]
         width = imr.shape[1]
-        labname = imname.replace(ext, '.txt')
+        labname = imname.replace(ext, 'txt').replace("images", "labels")
         labels = pd.read_csv(labname, sep=' ', names=['class', 'x1', 'y1', 'w', 'h'])
         
         # we need to rescale coordinates from 0-1 to real image height and width
@@ -34,7 +39,6 @@ def tiler(imnames, newpath, falsepath, slice_size, ext):
             boxes.append((int(row[1]['class']), Polygon([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])))
         
         counter = 0
-        print('Image:', imname)
         # create tiles and find intersection with bounding boxes for each tile
         for i in range((height // slice_size)):
             for j in range((width // slice_size)):
@@ -55,12 +59,11 @@ def tiler(imnames, newpath, falsepath, slice_size, ext):
                             sliced = imr[i*slice_size:(i+1)*slice_size, j*slice_size:(j+1)*slice_size]
                             sliced_im = Image.fromarray(sliced)
                             filename = imname.split('/')[-1]
-                            slice_path = newpath + "/" + filename.replace(ext, f'_{i}_{j}{ext}')                            
-                            slice_labels_path = newpath + "/" + filename.replace(ext, f'_{i}_{j}.txt')                            
-                            print(slice_path)
+                            slice_path = out_image_path / filename.replace(f".{ext}", f'_{i}_{j}.{ext}')                            
+                            slice_labels_path = out_label_path / filename.replace(f".{ext}", f'_{i}_{j}.txt')                            
                             sliced_im.save(slice_path)
                             imsaved = True                    
-                        
+                    
                         # get smallest rectangular polygon (with sides parallel to the coordinate axes) that contains the intersection
                         new_box = inter.envelope 
                         
@@ -84,87 +87,86 @@ def tiler(imnames, newpath, falsepath, slice_size, ext):
                 
                 if len(slice_labels) > 0:
                     slice_df = pd.DataFrame(slice_labels, columns=['class', 'x1', 'y1', 'w', 'h'])
-                    print(slice_df)
                     slice_df.to_csv(slice_labels_path, sep=' ', index=False, header=False, float_format='%.6f')
                 
-                if not imsaved and falsepath:
+                if not imsaved:
                     sliced = imr[i*slice_size:(i+1)*slice_size, j*slice_size:(j+1)*slice_size]
                     sliced_im = Image.fromarray(sliced)
                     filename = imname.split('/')[-1]
-                    slice_path = falsepath + "/" + filename.replace(ext, f'_{i}_{j}{ext}')                
+                    slice_path = out_image_path / filename.replace(f".{ext}", f'_{i}_{j}.{ext}')                
+                    slice_labels_path = out_label_path / filename.replace(f".{ext}", f'_{i}_{j}.txt')                            
 
                     sliced_im.save(slice_path)
-                    print('Slice without boxes saved')
                     imsaved = True
-
-def splitter(target, target_upfolder, ext, ratio):
-    imnames = glob.glob(f'{target}/*{ext}')
-    names = [name.split('/')[-1] for name in imnames]
-
-    # split dataset for train and test
-
-    train = []
-    test = []
-    for name in names:
-        if random.random() > ratio:
-            test.append(os.path.join(target, name))
-        else:
-            train.append(os.path.join(target, name))
-    print('train:', len(train))
-    print('test:', len(test))
-
-    # we will put test.txt, train.txt in a folder one level higher than images
-
-    # save train part
-    with open(f'{target_upfolder}/train.txt', 'w') as f:
-        for item in train:
-            f.write("%s\n" % item)
-
-    # save test part
-    with open(f'{target_upfolder}/test.txt', 'w') as f:
-        for item in test:
-            f.write("%s\n" % item)
 
 if __name__ == "__main__":
     # Initialize parser
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("-source", default="./yolosample/ts/", help = "Source folder with images and labels needed to be tiled")
+    parser.add_argument("-source", default="./yolosample/ts/", help = "path to yaml file that describes the dataset")
     parser.add_argument("-target", default="./yolosliced/ts/", help = "Target folder for a new sliced dataset")
-    parser.add_argument("-ext", default=".JPG", help = "Image extension in a dataset. Default: .JPG")
-    parser.add_argument("-falsefolder", default=None, help = "Folder for tiles without bounding boxes")
-    parser.add_argument("-size", type=int, default=416, help = "Size of a tile. Dafault: 416")
-    parser.add_argument("-ratio", type=float, default=0.8, help = "Train/test split ratio. Dafault: 0.8")
+    parser.add_argument("-size", type=int, default=640, help = "Size of a tile. Dafault: 416")
+    parser.add_argument("-ext", type=str, default="jpg", help = "Picture file format")
 
     args = parser.parse_args()
 
-    imnames = glob.glob(f'{args.source}/*{args.ext}')
-    labnames = glob.glob(f'{args.source}/*.txt')
+    source_path = Path(args.source)
+    out_path = Path(args.target)
+
+    print(source_path)
+
+    with open(source_path) as stream:
+        try:
+            yaml_file = safe_load(stream)
+        except yaml.YAMLError as exc:
+            print(exc)
+
+    train_imgs_path = source_path.parent / yaml_file["path"] / yaml_file["train"] / '*'
+    val_imgs_path = source_path.parent / yaml_file["path"] / yaml_file["val"] / '*'
+    test_imgs_path = source_path.parent / yaml_file["path"] / yaml_file["test"] / '*'
+
+    train_imgs_path_out = out_path / yaml_file["train"] 
+    val_imgs_path_out = out_path / yaml_file["val"]
+    test_imgs_path_out = out_path / yaml_file["test"]
+    train_labels_path_out = out_path / "labels/train"
+    val_labels_path_out = out_path / "labels/val"
+
+    train_imgs = glob.glob(str(train_imgs_path))
+    val_imgs = glob.glob(str(val_imgs_path))
+    test_imgs = glob.glob(str(test_imgs_path))
+
+    train_labels = str(train_imgs_path).replace("images", "labels")
+    val_labels = str(val_imgs_path).replace("images", "labels")
+
+    if os.path.exists(args.target):
+        raise Exception("Target folder should not exist yet")
     
-    if len(imnames) == 0:
-        raise Exception("Source folder should contain some images")
-    elif len(imnames) != len(labnames):
-        raise Exception("Dataset should contain equal number of images and txt files with labels")
+    os.makedirs(train_imgs_path_out)
+    os.makedirs(val_imgs_path_out)
+    os.makedirs(test_imgs_path_out)
+    os.makedirs(train_labels_path_out)
+    os.makedirs(val_labels_path_out)   
 
-    if not os.path.exists(args.target):
-        os.makedirs(args.target)
-    elif len(os.listdir(args.target)) > 0:
-        raise Exception("Target folder should be empty")
+    with open(str(out_path / args.target) + ".yaml", "w" ) as out_yaml:
+        out_config = yaml_file.copy()
+        out_config["path"] = ""
+        yaml.dump(yaml_file, out_yaml, default_flow_style=False)
 
-    # classes.names should be located one level higher than images   
-    # this file is not changing, so we will just copy it to a target folder 
-    upfolder = os.path.join(args.source, '..' )
-    target_upfolder = os.path.join(args.target, '..' )
-    if not os.path.exists(os.path.join(upfolder, 'classes.names')):
-        print('classes.names not found. It should be located one level higher than images')
-    else:
-        copyfile(os.path.join(upfolder, 'classes.names'), os.path.join(target_upfolder, 'classes.names'))
+    # # classes.names should be located one level higher than images   
+    # # this file is not changing, so we will just copy it to a target folder 
+    # upfolder = os.path.join(args.source, '..' )
+    # target_upfolder = os.path.join(args.target, '..' )
+    # if not os.path.exists(os.path.join(upfolder, 'classes.names')):
+    #     print('classes.names not found. It should be located one level higher than images')
+    # else:
+    #     copyfile(os.path.join(upfolder, 'classes.names'), os.path.join(target_upfolder, 'classes.names'))
     
-    if args.falsefolder:
-        if not os.path.exists(args.falsefolder):
-            os.makedirs(args.falsefolder)
-        elif len(os.listdir(args.falsefolder)) > 0:
-            raise Exception("Folder for tiles without boxes should be empty")
+    # if args.falsefolder:
+    #     if not os.path.exists(args.falsefolder):
+    #         os.makedirs(args.falsefolder)
+    #     elif len(os.listdir(args.falsefolder)) > 0:
+    #         raise Exception("Folder for tiles without boxes should be empty")
 
-    tiler(imnames, args.target, args.falsefolder, args.size, args.ext)
-    splitter(args.target, target_upfolder, args.ext, args.ratio)
+    tiler(train_imgs, train_imgs_path_out, train_labels_path_out, args.size, args.ext)
+    tiler(val_imgs, val_imgs_path_out, val_labels_path_out, args.size, args.ext)
+
